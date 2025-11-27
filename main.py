@@ -4,24 +4,14 @@ import sys
 import uuid
 import datetime
 import pytz
-import redis
+from src.helpers import get_channels, set_channels
+from src.redis import redis
 from telethon import events, Button, TelegramClient
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.errors import FloodWaitError, ChatAdminRequiredError, ChannelPrivateError
 import telethon
-from src.config import BOT_TOKEN, API_ID, API_HASH, CLIENT_ID, CLIENT_HASH, REDIS_HOST, REDIS_PASS, REDIS_USER, REDIS_PORT, CHANNEL_RULES
+from src.config import BOT_TOKEN, API_ID, API_HASH, CLIENT_ID, CLIENT_HASH, CHANNEL_RULES
 from uuid import uuid4
-
-# -------------------
-# Redis
-# -------------------
-r = redis.Redis(
-    host=REDIS_HOST,
-    port=int(REDIS_PORT),
-    username=REDIS_USER,
-    password=REDIS_PASS,
-    decode_responses=True,
-)
 
 # -------------------
 # Clients
@@ -32,27 +22,17 @@ user_client = TelegramClient("sessions/user_session", CLIENT_ID, CLIENT_HASH)
 # Temporary mapping: short keys → (ad_id, ch_id)
 instant_post_map = {}
 
-# -------------------
-# Helpers
-# -------------------
-def get_channels():
-    data = r.get("teleads:channels")
-    return json.loads(data) if data else []
-
-def set_channels(channels):
-    r.set("teleads:channels", json.dumps(channels))
-
 def get_state(uid):
-    return r.get(f"state:{uid}")
+    return redis.get(f"state:{uid}")
 
 def set_state(uid, state):
-    r.set(f"state:{uid}", state)
+    redis.set(f"state:{uid}", state)
 
 def clear_state(uid):
-    r.delete(f"state:{uid}")
+    redis.delete(f"state:{uid}")
 
 def get_adverts():
-    data = r.get("adverts")
+    data = redis.get("adverts")
     if not data:
         return []
     try:
@@ -62,22 +42,22 @@ def get_adverts():
     
 def get_channel_last(ad_id, ch_id):
     key = f"ad_posted:{ad_id}:{ch_id}"
-    val = r.get(key)
+    val = redis.get(key)
     return datetime.datetime.fromisoformat(val) if val else None
 
 def set_channel_last(ad_id, ch_id, dt):
     key = f"ad_posted:{ad_id}:{ch_id}"
-    r.set(key, dt.isoformat())
+    redis.set(key, dt.isoformat())
 
 def save_adverts(adverts):
-    r.set("adverts", json.dumps(adverts))
+    redis.set("adverts", json.dumps(adverts))
 
 def get_last_posted(ad_id):
-    date_str = r.get(f"ad_posted:{ad_id}")
+    date_str = redis.get(f"ad_posted:{ad_id}")
     return datetime.datetime.fromisoformat(date_str) if date_str else None
 
 def set_last_posted(ad_id, dt):
-    r.set(f"ad_posted:{ad_id}", dt.isoformat())
+    redis.set(f"ad_posted:{ad_id}", dt.isoformat())
 
 def find_ad(ad_id):
     for ad in get_adverts():
@@ -232,7 +212,7 @@ async def handle_messages(event):
             entity = await user_client.get_entity(text)
             eid = int(getattr(entity, "id"))
             eid_str = str(eid)
-            if not eid_str.startswith("-100"):
+            if not eid_stredis.startswith("-100"):
                 full = f"-100{abs(eid)}"
             else:
                 full = eid_str
@@ -252,11 +232,11 @@ async def handle_messages(event):
             clear_state(uid)
             await show_main_menu(event)
     elif state == "awaiting_ad_content":
-        r.set(f"temp_ad_content:{uid}", event.raw_text)
+        redis.set(f"temp_ad_content:{uid}", event.raw_text)
         await event.respond("🕒 Now send schedule for this ad (e.g. `2-10 GMT+3`):")
         set_state(uid, "awaiting_ad_schedule")
     elif state == "awaiting_ad_schedule":
-        content = r.get(f"temp_ad_content:{uid}")
+        content = redis.get(f"temp_ad_content:{uid}")
         schedule = event.raw_text.strip()
         channels = get_channels()
         if not channels:
@@ -265,7 +245,7 @@ async def handle_messages(event):
             return
 
         # Store temp ad
-        r.set(
+        redis.set(
             f"temp_ad:{uid}",
             json.dumps({"content": content, "schedule": schedule, "channels": []}),
         )
@@ -402,12 +382,12 @@ async def select_channel_callback(event):
 
     # CASE 1: user is creating a new ad
     if state == "awaiting_ad_channels":
-        temp = json.loads(r.get(f"temp_ad:{uid}"))
+        temp = json.loads(redis.get(f"temp_ad:{uid}"))
         if ch in temp["channels"]:
             temp["channels"].remove(ch)
         else:
             temp["channels"].append(ch)
-        r.set(f"temp_ad:{uid}", json.dumps(temp))
+        redis.set(f"temp_ad:{uid}", json.dumps(temp))
 
         # Refresh buttons (multi-select visual update)
         buttons = []
@@ -430,12 +410,12 @@ async def select_channel_callback(event):
 
     # CASE 2: user is editing an ad
     elif state == "editing_channels":
-        temp = json.loads(r.get(f"temp_edit_ad:{uid}"))
+        temp = json.loads(redis.get(f"temp_edit_ad:{uid}"))
         if ch in temp["channels"]:
             temp["channels"].remove(ch)
         else:
             temp["channels"].append(ch)
-        r.set(f"temp_edit_ad:{uid}", json.dumps(temp))
+        redis.set(f"temp_edit_ad:{uid}", json.dumps(temp))
 
         # Refresh buttons (multi-select visual update)
         buttons = []
@@ -548,7 +528,7 @@ async def edit_channels_callback(event):
         await event.respond("⚠️ No channels available. Add channels first.")
         return
 
-    r.set(
+    redis.set(
         f"temp_edit_ad:{event.sender_id}",
         json.dumps({"ad_id": ad_id, "channels": ad.get("channels", [])}),
     )
@@ -577,7 +557,7 @@ async def edit_channels_callback(event):
 async def toggle_edit_channel_callback(event):
     idx = int(event.data.decode().split(":")[1])
     uid = event.sender_id
-    temp = json.loads(r.get(f"temp_edit_ad:{uid}"))
+    temp = json.loads(redis.get(f"temp_edit_ad:{uid}"))
     ch = get_channels()[idx]
 
     if ch in temp["channels"]:
@@ -585,14 +565,14 @@ async def toggle_edit_channel_callback(event):
     else:
         temp["channels"].append(ch)
 
-    r.set(f"temp_edit_ad:{uid}", json.dumps(temp))
+    redis.set(f"temp_edit_ad:{uid}", json.dumps(temp))
     await event.answer(f"Selected channels: {len(temp['channels'])}")
 
 
 @bot_client.on(events.CallbackQuery(data=b"done_editing_channels"))
 async def done_editing_channels(event):
     uid = event.sender_id
-    temp = json.loads(r.get(f"temp_edit_ad:{uid}"))
+    temp = json.loads(redis.get(f"temp_edit_ad:{uid}"))
     ad_id = temp["ad_id"]
     selected_channels = temp["channels"]
 
@@ -602,7 +582,7 @@ async def done_editing_channels(event):
             ad["channels"] = selected_channels
     save_adverts(adverts)
 
-    r.delete(f"temp_edit_ad:{uid}")
+    redis.delete(f"temp_edit_ad:{uid}")
     clear_state(uid)
     await event.respond("✅ Channels updated for the ad!")
 
@@ -675,7 +655,7 @@ async def delete_ad_callback(event):
 @bot_client.on(events.CallbackQuery(data=b"done_selecting_channels"))
 async def done_selecting_channels(event):
     uid = event.sender_id
-    temp_ad = json.loads(r.get(f"temp_ad:{uid}"))
+    temp_ad = json.loads(redis.get(f"temp_ad:{uid}"))
     ad = {
         "id": str(uuid.uuid4()),
         "content": temp_ad["content"],
@@ -687,7 +667,7 @@ async def done_selecting_channels(event):
     adverts.append(ad)
     save_adverts(adverts)
     clear_state(uid)
-    r.delete(f"temp_ad:{uid}")
+    redis.delete(f"temp_ad:{uid}")
     await event.respond(
         f"✅ Ad created!\nContent: {ad['content']}\nSchedule: {ad['schedule']}\nChannels: {ad['channels']}"
     )
@@ -696,7 +676,7 @@ async def done_selecting_channels(event):
 
 def parse_schedule(schedule_str):
     try:
-        hours, tz = schedule_str.split()
+        hours, tz = schedule_stredis.split()
         start, end = map(int, hours.split("-"))
         offset = int(tz.replace("GMT", ""))
         return start, end, offset
@@ -721,7 +701,7 @@ async def debug_chat_permissions(ch_id: int):
         print("=== My Permissions ===")
         print(full)
     except ChannelPrivateError:
-        print("❌ Channel is private or you are not a member.")
+        print("❌ Channel is private or you are not a memberedis.")
     except Exception as e:
         print(f"❌ Failed to inspect chat: {e}")
 
@@ -744,7 +724,7 @@ async def send_message_to_channel(ch_id, ad):
         print(f"⚠️ Flood wait {e.seconds}s — sleeping...")
         await asyncio.sleep(e.seconds + 5)
     except ChannelPrivateError:
-        print(f"❌ Channel {ch_id} is private or you are not a member.")
+        print(f"❌ Channel {ch_id} is private or you are not a memberedis.")
     except ChatAdminRequiredError:
         try:
             await bot_client.send_message(int(ch_id), "content")
@@ -783,7 +763,7 @@ async def try_post_ad(ad):
             if last and last.date() == now.date():
                 # count posts today
                 key = f"ad_count:{ad['id']}:{ch}:{now.date()}"
-                count = int(r.get(key) or 0)
+                count = int(redis.get(key) or 0)
                 if count >= rules["max_posts_per_day"]:
                     print(f"⛔ Barcelona max daily reached for {ad['id']}")
                     continue
@@ -796,7 +776,7 @@ async def try_post_ad(ad):
             await send_message_to_channel(ch, ad)
             # increment daily counter
             key = f"ad_count:{ad['id']}:{ch}:{now.date()}"
-            r.set(key, int(r.get(key) or 0) + 1)
+            redis.set(key, int(redis.get(key) or 0) + 1)
             set_channel_last(ad["id"], ch, now)
             continue
 
@@ -804,7 +784,7 @@ async def try_post_ad(ad):
         if rules["type"] == "ltgrupe":
             week = now.isocalendar()[1]
             key = f"week_post:{ad['id']}:{ch}:{week}"
-            if r.get(key):
+            if redis.get(key):
                 continue  # already posted this week
 
             # daytime restriction
@@ -812,7 +792,7 @@ async def try_post_ad(ad):
                 continue
 
             await send_message_to_channel(ch, ad)
-            r.set(key, "1")
+            redis.set(key, "1")
             set_channel_last(ad["id"], ch, now)
             continue
 
@@ -825,7 +805,7 @@ async def try_post_ad(ad):
             hour_block = now.hour // by_hours
 
             key = f"teleads:hour_block:{ch}:{ad['id']}:{by_hours}"
-            last_hour_block = r.get(key)
+            last_hour_block = redis.get(key)
 
             # ❌ If we've already posted in this hour block → skip
             if last_hour_block and int(last_hour_block) == hour_block:
@@ -834,7 +814,7 @@ async def try_post_ad(ad):
             
             # Store new block
             next_expire = 3600 * by_hours
-            r.set(key, hour_block, ex=next_expire)
+            redis.set(key, hour_block, ex=next_expire)
 
             # Also enforce last-post gap (optional but you added it)
             if last:
