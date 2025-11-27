@@ -1,0 +1,13 @@
+services:
+  teleads-bot:
+    image: teleads-bot:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: teleads-bot
+    env_file: .env
+    volumes:
+      - ./sessions:/app/sessions
+    restart: unless-stopped
+    environment:
+      TZ: UTC

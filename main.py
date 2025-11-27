@@ -9,7 +9,7 @@ from telethon import events, Button, TelegramClient
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.errors import FloodWaitError, ChatAdminRequiredError, ChannelPrivateError
 import telethon
-from config import BOT_TOKEN, API_ID, API_HASH, CLIENT_ID, CLIENT_HASH, REDIS_HOST, REDIS_PASS, REDIS_USER, REDIS_PORT
+from src.config import BOT_TOKEN, API_ID, API_HASH, CLIENT_ID, CLIENT_HASH, REDIS_HOST, REDIS_PASS, REDIS_USER, REDIS_PORT, CHANNEL_RULES
 from uuid import uuid4
 
 # -------------------
@@ -26,8 +26,8 @@ r = redis.Redis(
 # -------------------
 # Clients
 # -------------------
-bot_client = TelegramClient("bot_session", API_ID, API_HASH)
-user_client = TelegramClient("user_session", CLIENT_ID, CLIENT_HASH)
+bot_client = TelegramClient("sessions/bot_session", API_ID, API_HASH)
+user_client = TelegramClient("sessions/user_session", CLIENT_ID, CLIENT_HASH)
 
 # Temporary mapping: short keys → (ad_id, ch_id)
 instant_post_map = {}
@@ -36,11 +36,11 @@ instant_post_map = {}
 # Helpers
 # -------------------
 def get_channels():
-    data = r.get("channels")
+    data = r.get("teleads:channels")
     return json.loads(data) if data else []
 
 def set_channels(channels):
-    r.set("channels", json.dumps(channels))
+    r.set("teleads:channels", json.dumps(channels))
 
 def get_state(uid):
     return r.get(f"state:{uid}")
@@ -59,6 +59,15 @@ def get_adverts():
         return json.loads(data)
     except:
         return []
+    
+def get_channel_last(ad_id, ch_id):
+    key = f"ad_posted:{ad_id}:{ch_id}"
+    val = r.get(key)
+    return datetime.datetime.fromisoformat(val) if val else None
+
+def set_channel_last(ad_id, ch_id, dt):
+    key = f"ad_posted:{ad_id}:{ch_id}"
+    r.set(key, dt.isoformat())
 
 def save_adverts(adverts):
     r.set("adverts", json.dumps(adverts))
@@ -748,32 +757,109 @@ async def try_post_ad(ad):
     if not ad["active"]:
         return
 
-    parsed = parse_schedule(ad["schedule"])
-    if not parsed:
-        print(f"❌ Invalid schedule for ad {ad['id']}")
-        return
+    tz = pytz.timezone("Europe/Vilnius")
+    now = datetime.datetime.now(tz)
 
-    start, end, offset = parsed
-    tzinfo = pytz.timezone("Europe/Vilnius")
-    now_utc = datetime.datetime.now(tzinfo)
+    channels = ad.get("channels") or get_channels()
 
-    # Check if we already posted this ad today
-    last_posted = get_last_posted(ad["id"])
-    if last_posted:
-        # If last posted today in this hour slot, skip
-        if last_posted.date() == now_utc.date() and start <= last_posted.hour < end:
-            print(f"⏰ Already posted today for ad {ad['id']}")
-            return
+    for ch in channels:
+        ch = str(ch)
+        rules = CHANNEL_RULES.get(ch, {"type": "normal"})
 
-    # Only post if current hour in schedule
-    if start <= now_utc.hour < end:
-        target_channels = ad.get("channels") or get_channels()
-        for ch in target_channels:
+        last = get_channel_last(ad["id"], ch)
+
+        # ---- 1) Barcelona ----
+        if rules["type"] == "barcelona":
+            # time window
+            if not (rules["start"] <= now.hour < rules["end"]):
+                continue
+
+            # max length
+            if len(ad["content"]) > rules["max_length"]:
+                print(f"❌ Ad too long for Barcelona ({ch}).")
+                continue
+
+            # daily limit
+            if last and last.date() == now.date():
+                # count posts today
+                key = f"ad_count:{ad['id']}:{ch}:{now.date()}"
+                count = int(r.get(key) or 0)
+                if count >= rules["max_posts_per_day"]:
+                    print(f"⛔ Barcelona max daily reached for {ad['id']}")
+                    continue
+
+                # still in allowed hour slot? avoid duplicates
+                if last.hour == now.hour:
+                    continue
+
+            # perform send
             await send_message_to_channel(ch, ad)
-        # Mark as posted
-        set_last_posted(ad["id"], now_utc)
-    else:
-        print(f"⏰ Time not in range: {now_utc} (schedule {start}-{end} GMT+3)")
+            # increment daily counter
+            key = f"ad_count:{ad['id']}:{ch}:{now.date()}"
+            r.set(key, int(r.get(key) or 0) + 1)
+            set_channel_last(ad["id"], ch, now)
+            continue
+
+        # ---- 2) LTgrupe ----
+        if rules["type"] == "ltgrupe":
+            week = now.isocalendar()[1]
+            key = f"week_post:{ad['id']}:{ch}:{week}"
+            if r.get(key):
+                continue  # already posted this week
+
+            # daytime restriction
+            if not (rules["daytime_start"] <= now.hour < rules["daytime_end"]):
+                continue
+
+            await send_message_to_channel(ch, ad)
+            r.set(key, "1")
+            set_channel_last(ad["id"], ch, now)
+            continue
+
+        # ---- 3) Hourly (Baltarusijos / Pribaltic) ----
+        if rules["type"] == "hourly":
+            # defaults to 1 hour
+            by_hours = rules.get("by_hours", 1)
+
+            # Calculate the "hour block"
+            hour_block = now.hour // by_hours
+
+            key = f"teleads:hour_block:{ch}:{ad['id']}:{by_hours}"
+            last_hour_block = r.get(key)
+
+            # ❌ If we've already posted in this hour block → skip
+            if last_hour_block and int(last_hour_block) == hour_block:
+                print(f"📌 Hour block already satisfied for {ad['id']}_{ch}. Skipping post.")
+                return False
+            
+            # Store new block
+            next_expire = 3600 * by_hours
+            r.set(key, hour_block, ex=next_expire)
+
+            # Also enforce last-post gap (optional but you added it)
+            if last:
+                elapsed_hours = (now - last).total_seconds() / 3600
+                if elapsed_hours < by_hours:
+                    continue
+
+            # All checks passed → post
+            await send_message_to_channel(ch, ad)
+            set_channel_last(ad["id"], ch, now)
+            continue
+
+        # ---- 4) Default scheduler (old behaviour) ----
+        parsed = parse_schedule(ad["schedule"])
+        if not parsed:
+            continue
+
+        start, end, offset = parsed
+
+        if start <= now.hour < end:
+            if last and last.date() == now.date() and last.hour == now.hour:
+                continue
+
+            await send_message_to_channel(ch, ad)
+            set_channel_last(ad["id"], ch, now)
 
 async def run_scheduler_once():
     adverts = get_adverts()
