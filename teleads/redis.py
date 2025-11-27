@@ -1,5 +1,5 @@
 from redis import Redis
-from src.config import REDIS_HOST, REDIS_PASS, REDIS_PORT, REDIS_USER
+from .config import REDIS_HOST, REDIS_PASS, REDIS_PORT, REDIS_USER
 
 redis = Redis(
     host=REDIS_HOST,

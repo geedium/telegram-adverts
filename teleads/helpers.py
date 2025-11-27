@@ -1,5 +1,5 @@
 import json
-from src.redis import redis
+from .redis import redis
 
 def get_channels():
     data = redis.get("teleads:channels")

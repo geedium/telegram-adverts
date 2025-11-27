@@ -4,13 +4,13 @@ import sys
 import uuid
 import datetime
 import pytz
-from src.helpers import get_channels, set_channels
-from src.redis import redis
+from teleads.helpers import get_channels, set_channels
+from teleads.redis import redis
 from telethon import events, Button, TelegramClient
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.errors import FloodWaitError, ChatAdminRequiredError, ChannelPrivateError
 import telethon
-from src.config import BOT_TOKEN, API_ID, API_HASH, CLIENT_ID, CLIENT_HASH, CHANNEL_RULES
+from teleads.config import BOT_TOKEN, API_ID, API_HASH, CLIENT_ID, CLIENT_HASH, CHANNEL_RULES
 from uuid import uuid4
 
 # -------------------
