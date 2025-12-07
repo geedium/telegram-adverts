@@ -39,6 +39,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # -----------------------------
+# Generate Prisma client
+# -----------------------------
+RUN python -m prisma generate
+
+# -----------------------------
 # Expose folder for sessions (optional, for host mount)
 # -----------------------------
 VOLUME ["/app/sessions"]
