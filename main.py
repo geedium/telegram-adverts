@@ -4,7 +4,7 @@ import sys
 import uuid
 import datetime
 import pytz
-from teleads.helpers import get_channels, set_channels
+from teleads.helpers import get_adverts, set_adverts, get_channels, set_channels
 from teleads.redis import redis
 from telethon import events, Button, TelegramClient
 from telethon.tl.functions.channels import JoinChannelRequest
@@ -12,6 +12,7 @@ from telethon.errors import FloodWaitError, ChatAdminRequiredError, ChannelPriva
 import telethon
 from teleads.config import BOT_TOKEN, API_ID, API_HASH, CLIENT_ID, CLIENT_HASH, CHANNEL_RULES
 from uuid import uuid4
+from teleads.prisma import db
 
 # -------------------
 # Clients
@@ -30,15 +31,6 @@ def set_state(uid, state):
 
 def clear_state(uid):
     redis.delete(f"state:{uid}")
-
-def get_adverts():
-    data = redis.get("adverts")
-    if not data:
-        return []
-    try:
-        return json.loads(data)
-    except:
-        return []
     
 def get_channel_last(ad_id, ch_id):
     key = f"ad_posted:{ad_id}:{ch_id}"
@@ -49,9 +41,6 @@ def set_channel_last(ad_id, ch_id, dt):
     key = f"ad_posted:{ad_id}:{ch_id}"
     redis.set(key, dt.isoformat())
 
-def save_adverts(adverts):
-    redis.set("adverts", json.dumps(adverts))
-
 def get_last_posted(ad_id):
     date_str = redis.get(f"ad_posted:{ad_id}")
     return datetime.datetime.fromisoformat(date_str) if date_str else None
@@ -59,8 +48,9 @@ def get_last_posted(ad_id):
 def set_last_posted(ad_id, dt):
     redis.set(f"ad_posted:{ad_id}", dt.isoformat())
 
-def find_ad(ad_id):
-    for ad in get_adverts():
+async def find_ad(ad_id):
+    adverts = await get_adverts()
+    for ad in adverts:
         if ad["id"] == ad_id:
             return ad
     return None
@@ -84,7 +74,7 @@ async def show_main_menu(event):
 
 async def show_adverts_menu(event):
     try:
-        adverts = get_adverts()
+        adverts = await get_adverts()
         if not adverts:
             await event.edit(
                 "📝 No adverts yet.",
@@ -130,7 +120,7 @@ async def run_scheduler_once_callback(event):
 
 @bot_client.on(events.CallbackQuery(data=b"run_without_scheduler"))
 async def run_without_scheduler(event):
-    adverts = get_adverts()
+    adverts = await get_adverts()
     if not adverts:
         await event.answer("❌ No adverts available.", alert=True)
         return
@@ -150,7 +140,7 @@ async def handle_back(event):
 
 @bot_client.on(events.CallbackQuery(data=b"instant_post_select_ad"))
 async def instant_post_select_ad_callback(event):
-    adverts = get_adverts()
+    adverts = await get_adverts()
     if not adverts:
         await event.answer("❌ No adverts available.", alert=True)
         return
@@ -165,7 +155,7 @@ async def instant_post_select_ad_callback(event):
 
 @bot_client.on(events.CallbackQuery(data=b"channels"))
 async def handle_channels(event):
-    channels = get_channels()  # list of channel IDs as strings
+    channels = await get_channels()  # list of channel IDs as strings
     if channels:
         lines = []
         for ch_id in channels:
@@ -212,15 +202,15 @@ async def handle_messages(event):
             entity = await user_client.get_entity(text)
             eid = int(getattr(entity, "id"))
             eid_str = str(eid)
-            if not eid_stredis.startswith("-100"):
+            if not eid_str.startswith("-100"):
                 full = f"-100{abs(eid)}"
             else:
                 full = eid_str
 
-            channels = get_channels()
+            channels = await get_channels()
             if full not in channels:
                 channels.append(full)
-                set_channels(channels)
+                await set_channels(channels)
                 await event.respond(
                     f"✅ Added channel {getattr(entity, 'title', text)} ({full})"
                 )
@@ -238,7 +228,7 @@ async def handle_messages(event):
     elif state == "awaiting_ad_schedule":
         content = redis.get(f"temp_ad_content:{uid}")
         schedule = event.raw_text.strip()
-        channels = get_channels()
+        channels = await get_channels()
         if not channels:
             await event.respond("⚠️ No channels available. Add channels first.")
             clear_state(uid)
@@ -263,11 +253,11 @@ async def handle_messages(event):
         )
     elif state.startswith("editing_text:"):
         ad_id = state.split(":")[1]
-        adverts = get_adverts()
+        adverts = await get_adverts()
         for ad in adverts:
             if ad["id"] == ad_id:
                 ad["content"] = event.raw_text
-        save_adverts(adverts)
+        await set_adverts(adverts)
         clear_state(uid)
 
         await edit_ad_callback(
@@ -290,11 +280,11 @@ async def handle_messages(event):
             await event.respond("❌ Invalid format. Use `2-10 GMT+3`")
             return
 
-        adverts = get_adverts()
+        adverts = await get_adverts()
         for ad in adverts:
             if ad["id"] == ad_id:
                 ad["schedule"] = new_schedule
-        save_adverts(adverts)
+        await set_adverts(adverts)
         clear_state(uid)
 
         await edit_ad_callback(
@@ -317,12 +307,12 @@ async def handle_messages(event):
 @bot_client.on(events.CallbackQuery(pattern=b"instant_post_ad:(.*)"))
 async def instant_post_ad_callback(event):
     ad_id = event.data.decode().split(":")[1]
-    ad = find_ad(ad_id)
+    ad = await find_ad(ad_id)
     if not ad:
         await event.answer("❌ Ad not found.", alert=True)
         return
 
-    channels = get_channels()
+    channels = await get_channels()
     if not channels:
         await event.answer("⚠️ No channels configured.", alert=True)
         return
@@ -355,7 +345,7 @@ async def instant_post_channel_callback(event):
         return
 
     ad_id, ch_id = instant_post_map.pop(key)  # remove after use
-    ad = find_ad(ad_id)
+    ad = await find_ad(ad_id)
     if not ad:
         await event.answer("❌ Ad not found.", alert=True)
         return
@@ -373,7 +363,7 @@ async def select_channel_callback(event):
     idx = int(event.data.decode().split(":")[1])
     state = get_state(uid)
 
-    channels = get_channels()
+    channels = await get_channels()
     if idx >= len(channels):
         await event.answer("Invalid channel index", alert=True)
         return
@@ -452,7 +442,7 @@ def format_schedule(schedule: str) -> str:
         return schedule
 
 async def show_ad_menu(event, ad_id):
-    ad = find_ad(ad_id)
+    ad = await find_ad(ad_id)
     if not ad:
         await event.respond("❌ Ad not found.")
         return
@@ -488,7 +478,7 @@ async def edit_ad_callback(event):
 @bot_client.on(events.CallbackQuery(pattern=b"edit_schedule:(.*)"))
 async def edit_schedule_callback(event):
     ad_id = event.data.decode().split(":")[1]
-    ad = find_ad(ad_id)
+    ad = await find_ad(ad_id)
     if not ad:
         await event.respond("❌ Ad not found.")
         return
@@ -503,7 +493,7 @@ async def edit_schedule_callback(event):
 @bot_client.on(events.CallbackQuery(pattern=b"edit_content:(.*)"))
 async def edit_content_callback(event):
     ad_id = event.data.decode().split(":")[1]
-    ad = find_ad(ad_id)
+    ad = await find_ad(ad_id)
     if not ad:
         await event.respond("❌ Ad not found.")
         return
@@ -518,12 +508,12 @@ async def edit_content_callback(event):
 @bot_client.on(events.CallbackQuery(pattern=b"edit_channels:(.*)"))
 async def edit_channels_callback(event):
     ad_id = event.data.decode().split(":")[1]
-    ad = find_ad(ad_id)
+    ad = await find_ad(ad_id)
     if not ad:
         await event.respond("❌ Ad not found.")
         return
 
-    channels = get_channels()
+    channels = await get_channels()
     if not channels:
         await event.respond("⚠️ No channels available. Add channels first.")
         return
@@ -558,7 +548,7 @@ async def toggle_edit_channel_callback(event):
     idx = int(event.data.decode().split(":")[1])
     uid = event.sender_id
     temp = json.loads(redis.get(f"temp_edit_ad:{uid}"))
-    ch = get_channels()[idx]
+    ch = await get_channels()[idx]
 
     if ch in temp["channels"]:
         temp["channels"].remove(ch)
@@ -576,11 +566,11 @@ async def done_editing_channels(event):
     ad_id = temp["ad_id"]
     selected_channels = temp["channels"]
 
-    adverts = get_adverts()
+    adverts = await get_adverts()
     for ad in adverts:
         if ad["id"] == ad_id:
             ad["channels"] = selected_channels
-    save_adverts(adverts)
+    await set_adverts(adverts)
 
     redis.delete(f"temp_edit_ad:{uid}")
     clear_state(uid)
@@ -603,12 +593,12 @@ async def done_editing_channels(event):
 @bot_client.on(events.CallbackQuery(pattern=b"instant_post_ad_all:(.*)"))
 async def instant_post_ad_all_callback(event):
     ad_id = event.data.decode().split(":")[1]
-    ad = find_ad(ad_id)
+    ad = await find_ad(ad_id)
     if not ad:
         await event.answer("❌ Ad not found.", alert=True)
         return
 
-    channels = ad.get("channels") or get_channels()
+    channels = ad.get("channels") or await get_channels()
     if not channels:
         await event.answer("⚠️ No channels configured for this ad.", alert=True)
         return
@@ -628,13 +618,13 @@ async def instant_post_ad_all_callback(event):
 @bot_client.on(events.CallbackQuery(pattern=b"toggle_ad:(.*)"))
 async def toggle_ad_callback(event):
     ad_id = event.data.decode().split(":")[1]
-    adverts = get_adverts()
+    adverts = await get_adverts()
     updated = False
     for ad in adverts:
         if ad["id"] == ad_id:
             ad["active"] = not ad["active"]
             updated = True
-    save_adverts(adverts)
+    await set_adverts(adverts)
 
     if updated:
         try:
@@ -646,8 +636,9 @@ async def toggle_ad_callback(event):
 @bot_client.on(events.CallbackQuery(pattern=b"delete_ad:(.*)"))
 async def delete_ad_callback(event):
     ad_id = event.data.decode().split(":")[1]
-    adverts = [ad for ad in get_adverts() if ad["id"] != ad_id]
-    save_adverts(adverts)
+    adverts = await get_adverts()
+    adverts_normalized = [ad for ad in adverts if ad["id"] != ad_id]
+    await set_adverts(adverts_normalized)
     await event.edit("🗑 Ad deleted.")
     await show_adverts_menu(event)
 
@@ -663,9 +654,9 @@ async def done_selecting_channels(event):
         "channels": temp_ad["channels"],
         "active": False,
     }
-    adverts = get_adverts()
+    adverts = await get_adverts()
     adverts.append(ad)
-    save_adverts(adverts)
+    await set_adverts(adverts)
     clear_state(uid)
     redis.delete(f"temp_ad:{uid}")
     await event.respond(
@@ -676,7 +667,7 @@ async def done_selecting_channels(event):
 
 def parse_schedule(schedule_str):
     try:
-        hours, tz = schedule_stredis.split()
+        hours, tz = schedule_str.split()
         start, end = map(int, hours.split("-"))
         offset = int(tz.replace("GMT", ""))
         return start, end, offset
@@ -740,7 +731,7 @@ async def try_post_ad(ad):
     tz = pytz.timezone("Europe/Vilnius")
     now = datetime.datetime.now(tz)
 
-    channels = ad.get("channels") or get_channels()
+    channels = ad.get("channels") or await get_channels()
 
     for ch in channels:
         ch = str(ch)
@@ -842,7 +833,7 @@ async def try_post_ad(ad):
             set_channel_last(ad["id"], ch, now)
 
 async def run_scheduler_once():
-    adverts = get_adverts()
+    adverts = await get_adverts()
     for ad in adverts:
         await try_post_ad(ad)
 
@@ -855,6 +846,7 @@ async def scheduler_loop():
 # Bootstrap
 # -------------------
 async def main():
+    await db.connect()
     async with bot_client:
         await bot_client.start(bot_token=BOT_TOKEN)
         async with user_client:
@@ -865,6 +857,7 @@ async def main():
                 user_client.run_until_disconnected(),
                 scheduler_loop(),
             )
+    await db.disconnect()
 
 
 if __name__ == "__main__":

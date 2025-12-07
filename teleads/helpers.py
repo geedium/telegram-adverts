@@ -1,9 +1,48 @@
 import json
-from .redis import redis
+from .prisma import db
 
-def get_channels():
-    data = redis.get("teleads:channels")
-    return json.loads(data) if data else []
+CACHE_KEY_CHANNELS = "teleads:channels"
 
-def set_channels(channels):
-    redis.set("teleads:channels", json.dumps(channels))
+
+async def get_adverts():
+    record = await db.cache.find_unique(where={"key": "teleads:adverts"})
+    if not record or not record.value:
+        return []
+
+    try:
+        return json.loads(record.value)
+    except json.JSONDecodeError:
+        return []
+
+
+async def set_adverts(adverts):
+    value = json.dumps(adverts)
+    await db.cache.upsert(
+        where={"key": "teleads:adverts"},
+        data={
+            "update": {"value": value},
+            "create": {"key": "teleads:adverts", "value": value},
+        },
+    )
+
+
+async def get_channels():
+    record = await db.cache.find_unique(where={"key": CACHE_KEY_CHANNELS})
+    if not record or not record.value:
+        return []
+
+    try:
+        return json.loads(record.value)
+    except json.JSONDecodeError:
+        return []
+
+
+async def set_channels(channels: list):
+    value = json.dumps(channels)
+    await db.cache.upsert(
+        where={"key": CACHE_KEY_CHANNELS},
+        data={
+            "update": {"value": value},
+            "create": {"key": CACHE_KEY_CHANNELS, "value": value},
+        },
+    )
